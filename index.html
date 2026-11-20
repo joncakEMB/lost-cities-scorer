@@ -331,6 +331,8 @@ function App() {
   };
 
   // === Subcomponents ===
+  // Called as plain functions (not <Component />): they are redefined every render,
+  // so mounting them as components would remount the rows and reset horizontal scroll.
   const CardTile = ({ color, card, player }) => {
     const owner = board[color][card];
     const isMine = owner === player;
@@ -352,6 +354,7 @@ function App() {
 
     return (
       <button
+        key={card}
         type="button"
         onClick={() => handleToggleCard(color, card, player)}
         disabled={isLockedByOpponent}
@@ -376,7 +379,7 @@ function App() {
     const info = liveScores[player].expeditions[color];
 
     return (
-      <div className="flex flex-row items-stretch w-full flex-1 min-h-0 bg-slate-900/90 rounded-lg overflow-hidden border border-slate-800 shadow-sm">
+      <div key={color} className="flex flex-row items-stretch w-full flex-1 min-h-0 bg-slate-900/90 rounded-lg overflow-hidden border border-slate-800 shadow-sm">
         {/* Sticky Left Expedition Score Badge */}
         <div
           className={`${theme.badgeBg} ${theme.badgeText} w-14 sm:w-16 shrink-0 flex flex-col items-center justify-center px-1 border-r border-black/15 relative`}
@@ -411,16 +414,12 @@ function App() {
 
         {/* Horizontally Scrollable Cards Strip */}
         <div className="flex-1 flex flex-row items-center overflow-x-auto gap-1.5 px-1.5 py-1 [&::-webkit-scrollbar]:hidden [-ms-overflow-style:none] [scrollbar-width:none] touch-pan-x">
-          {WAGERS.map((wagerCard) => (
-            <CardTile key={wagerCard} color={color} card={wagerCard} player={player} />
-          ))}
+          {WAGERS.map((card) => CardTile({ color, card, player }))}
 
           {/* Visual separator between Wagers and Numbered Cards */}
           <div className="w-[2px] h-3/5 bg-slate-700/80 rounded-full shrink-0 mx-0.5" />
 
-          {NUMBERS.map((numCard) => (
-            <CardTile key={numCard} color={color} card={numCard} player={player} />
-          ))}
+          {NUMBERS.map((card) => CardTile({ color, card, player }))}
         </div>
       </div>
     );
@@ -428,9 +427,7 @@ function App() {
 
   const PlayerHalf = ({ player }) => (
     <div className="flex flex-col h-full w-full p-1.5 sm:p-2 gap-1.5 bg-slate-950 select-none">
-      {COLORS.map((color) => (
-        <ExpeditionRow key={color} color={color} player={player} />
-      ))}
+      {COLORS.map((color) => ExpeditionRow({ color, player }))}
     </div>
   );
 
@@ -452,7 +449,7 @@ function App() {
     <div className="fixed inset-0 h-[100dvh] w-full flex flex-col bg-slate-950 text-slate-100 font-sans overflow-hidden touch-manipulation">
       {/* === TOP HALF: PLAYER 2 (Rotated 180° for tabletop face-to-face play) === */}
       <div className="flex-1 min-h-0 rotate-180 flex flex-col">
-        <PlayerHalf player="p2" />
+        {PlayerHalf({ player: 'p2' })}
       </div>
 
       {/* === CENTER CONSOLE: ROUND PILL, MIRRORED SCORES & ROUND CONTROLS === */}
@@ -541,7 +538,7 @@ function App() {
 
       {/* === BOTTOM HALF: PLAYER 1 (Standard upright orientation) === */}
       <div className="flex-1 min-h-0 flex flex-col">
-        <PlayerHalf player="p1" />
+        {PlayerHalf({ player: 'p1' })}
       </div>
 
       {/* === SCORECARD & MATCH HISTORY MODAL === */}
