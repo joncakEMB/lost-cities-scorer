@@ -1,0 +1,715 @@
+import React, { useState, useMemo, useEffect } from 'react';
+import { Trophy, RotateCcw, Check, X, Undo2, Lock, Sparkles } from 'lucide-react';
+
+// === Game Configuration & Constants ===
+const STORAGE_KEY = 'lost_cities_h2h_match_v1';
+const STANDARD_ROUNDS = 3;
+
+const COLORS = ['yellow', 'blue', 'white', 'green', 'red'];
+const WAGERS = ['W1', 'W2', 'W3'];
+const NUMBERS = ['2', '3', '4', '5', '6', '7', '8', '9', '10'];
+const ALL_CARDS = [...WAGERS, ...NUMBERS];
+
+// Tabletop color themes for the 5 Lost Cities expeditions
+const EXPEDITION_THEMES = {
+  yellow: {
+    label: 'Yellow',
+    badgeBg: 'bg-amber-400',
+    badgeText: 'text-amber-950',
+    cardActiveBg: 'bg-amber-400',
+    cardActiveText: 'text-amber-950',
+    cardActiveBorder: 'border-amber-200',
+    cardHintBorder: 'border-t-amber-400/70',
+    dot: 'bg-amber-400',
+  },
+  blue: {
+    label: 'Blue',
+    badgeBg: 'bg-sky-500',
+    badgeText: 'text-white',
+    cardActiveBg: 'bg-sky-500',
+    cardActiveText: 'text-white',
+    cardActiveBorder: 'border-sky-200',
+    cardHintBorder: 'border-t-sky-400/70',
+    dot: 'bg-sky-400',
+  },
+  white: {
+    label: 'White',
+    badgeBg: 'bg-slate-100',
+    badgeText: 'text-slate-900',
+    cardActiveBg: 'bg-slate-100',
+    cardActiveText: 'text-slate-900',
+    cardActiveBorder: 'border-white',
+    cardHintBorder: 'border-t-slate-200/80',
+    dot: 'bg-slate-100',
+  },
+  green: {
+    label: 'Green',
+    badgeBg: 'bg-emerald-500',
+    badgeText: 'text-emerald-950',
+    cardActiveBg: 'bg-emerald-500',
+    cardActiveText: 'text-emerald-950',
+    cardActiveBorder: 'border-emerald-200',
+    cardHintBorder: 'border-t-emerald-400/70',
+    dot: 'bg-emerald-400',
+  },
+  red: {
+    label: 'Red',
+    badgeBg: 'bg-rose-500',
+    badgeText: 'text-white',
+    cardActiveBg: 'bg-rose-500',
+    cardActiveText: 'text-white',
+    cardActiveBorder: 'border-rose-200',
+    cardHintBorder: 'border-t-rose-400/70',
+    dot: 'bg-rose-400',
+  },
+};
+
+/**
+ * Generates a fresh, unclaimed board state where every card in all 5 colors is null.
+ * Card ownership values: null (unclaimed), 'p1' (Player 1), or 'p2' (Player 2).
+ */
+function createEmptyBoard() {
+  const fresh = {};
+  COLORS.forEach((color) => {
+    fresh[color] = {};
+    ALL_CARDS.forEach((card) => {
+      fresh[color][card] = null;
+    });
+  });
+  return fresh;
+}
+
+/**
+ * Safely loads persisted match data from localStorage with validation fallback.
+ */
+function loadSavedMatch() {
+  try {
+    const raw = window.localStorage.getItem(STORAGE_KEY);
+    if (!raw) return { board: createEmptyBoard(), rounds: [] };
+    const parsed = JSON.parse(raw);
+
+    // Validate board structure
+    const validBoard = createEmptyBoard();
+    if (parsed && typeof parsed.board === 'object' && parsed.board !== null) {
+      COLORS.forEach((color) => {
+        if (parsed.board[color] && typeof parsed.board[color] === 'object') {
+          ALL_CARDS.forEach((card) => {
+            const owner = parsed.board[color][card];
+            if (owner === 'p1' || owner === 'p2' || owner === null) {
+              validBoard[color][card] = owner;
+            }
+          });
+        }
+      });
+    }
+
+    const validRounds = Array.isArray(parsed?.rounds) ? parsed.rounds : [];
+    return { board: validBoard, rounds: validRounds };
+  } catch {
+    return { board: createEmptyBoard(), rounds: [] };
+  }
+}
+
+/**
+ * Computes official Lost Cities expedition and round totals for a given player.
+ * Formula per started color: (Sum of numbered cards - 20) * (1 + Wagers) + (20 if >= 8 cards)
+ */
+function evaluatePlayerBoard(board, player) {
+  let total = 0;
+  let totalCardsPlayed = 0;
+  const expeditions = {};
+
+  COLORS.forEach((color) => {
+    let numberSum = 0;
+    let wagerCount = 0;
+    let cardCount = 0;
+
+    ALL_CARDS.forEach((card) => {
+      if (board[color][card] === player) {
+        cardCount += 1;
+        if (card.startsWith('W')) {
+          wagerCount += 1;
+        } else {
+          numberSum += parseInt(card, 10);
+        }
+      }
+    });
+
+    totalCardsPlayed += cardCount;
+
+    let score = 0;
+    const hasBonus = cardCount >= 8;
+    if (cardCount > 0) {
+      score = (numberSum - 20) * (1 + wagerCount) + (hasBonus ? 20 : 0);
+    }
+
+    expeditions[color] = {
+      score,
+      cardCount,
+      wagerCount,
+      hasBonus,
+      started: cardCount > 0,
+    };
+    total += score;
+  });
+
+  return { total, totalCardsPlayed, expeditions };
+}
+
+/**
+ * Formats signed or unsigned round deltas clearly (e.g., +24, -10, 0).
+ */
+function formatSigned(val) {
+  if (val > 0) return `+${val}`;
+  return `${val}`;
+}
+
+export default function App() {
+  // === Persistent Match State ===
+  const [matchState, setMatchState] = useState(() => loadSavedMatch());
+  const { board, rounds } = matchState;
+
+  // === Interactive UI Confirmation & Modal States ===
+  const [confirmEndRound, setConfirmEndRound] = useState(false);
+  const [confirmNewMatch, setConfirmNewMatch] = useState(false);
+  const [isScorecardOpen, setIsScorecardOpen] = useState(false);
+
+  // Save match progress to localStorage on every state update
+  useEffect(() => {
+    try {
+      window.localStorage.setItem(STORAGE_KEY, JSON.stringify({ board, rounds }));
+    } catch {
+      // Gracefully ignore storage quota or sandbox restrictions
+    }
+  }, [board, rounds]);
+
+  // Auto-cancel two-tap "End Round" confirmation after 3.5 seconds
+  useEffect(() => {
+    if (!confirmEndRound) return;
+    const timer = setTimeout(() => setConfirmEndRound(false), 3500);
+    return () => clearTimeout(timer);
+  }, [confirmEndRound]);
+
+  // Auto-cancel two-tap "New Match" confirmation after 3.5 seconds
+  useEffect(() => {
+    if (!confirmNewMatch) return;
+    const timer = setTimeout(() => setConfirmNewMatch(false), 3500);
+    return () => clearTimeout(timer);
+  }, [confirmNewMatch]);
+
+  // === Derived Live & Cumulative Scores ===
+  const liveScores = useMemo(
+    () => ({
+      p1: evaluatePlayerBoard(board, 'p1'),
+      p2: evaluatePlayerBoard(board, 'p2'),
+    }),
+    [board]
+  );
+
+  const completedTotals = useMemo(() => {
+    return rounds.reduce(
+      (acc, r) => ({
+        p1: acc.p1 + r.p1,
+        p2: acc.p2 + r.p2,
+      }),
+      { p1: 0, p2: 0 }
+    );
+  }, [rounds]);
+
+  // Overall running match total including current live round points
+  const runningMatchTotals = {
+    p1: completedTotals.p1 + liveScores.p1.total,
+    p2: completedTotals.p2 + liveScores.p2.total,
+  };
+
+  const currentRoundNumber = rounds.length + 1;
+
+  // === Card Selection & Shared Deck Lockout Handler ===
+  const handleToggleCard = (color, card, player) => {
+    setMatchState((prev) => {
+      const currentOwner = prev.board[color][card];
+      // Prevent claiming a card already locked by the opponent
+      if (currentOwner !== null && currentOwner !== player) {
+        return prev;
+      }
+
+      const nextOwner = currentOwner === player ? null : player;
+      return {
+        ...prev,
+        board: {
+          ...prev.board,
+          [color]: {
+            ...prev.board[color],
+            [card]: nextOwner,
+          },
+        },
+      };
+    });
+  };
+
+  // === Multi-Round Actions ===
+  const handleEndRoundClick = () => {
+    if (!confirmEndRound) {
+      setConfirmEndRound(true);
+      return;
+    }
+
+    const newRoundEntry = {
+      round: currentRoundNumber,
+      p1: liveScores.p1.total,
+      p2: liveScores.p2.total,
+      boardSnapshot: board,
+    };
+
+    const updatedRounds = [...rounds, newRoundEntry];
+
+    setMatchState({
+      board: createEmptyBoard(),
+      rounds: updatedRounds,
+    });
+    setConfirmEndRound(false);
+
+    // Automatically surface the scorecard when completing the standard 3rd round
+    if (updatedRounds.length === STANDARD_ROUNDS) {
+      setIsScorecardOpen(true);
+    }
+  };
+
+  const handleUndoLastRound = () => {
+    if (rounds.length === 0) return;
+
+    const lastRound = rounds[rounds.length - 1];
+    const remainingRounds = rounds.slice(0, -1);
+    const isCurrentBoardEmpty =
+      liveScores.p1.totalCardsPlayed === 0 && liveScores.p2.totalCardsPlayed === 0;
+
+    setMatchState({
+      // Restore the undone round's cards if the new round board hasn't been touched yet
+      board:
+        isCurrentBoardEmpty && lastRound.boardSnapshot
+          ? lastRound.boardSnapshot
+          : board,
+      rounds: remainingRounds,
+    });
+    setConfirmEndRound(false);
+  };
+
+  const handleNewMatchClick = () => {
+    if (!confirmNewMatch) {
+      setConfirmNewMatch(true);
+      return;
+    }
+
+    setMatchState({
+      board: createEmptyBoard(),
+      rounds: [],
+    });
+    setConfirmNewMatch(false);
+    setConfirmEndRound(false);
+    setIsScorecardOpen(false);
+  };
+
+  // === Subcomponents ===
+  const CardTile = ({ color, card, player }) => {
+    const owner = board[color][card];
+    const isMine = owner === player;
+    const isLockedByOpponent = owner !== null && owner !== player;
+    const isWager = card.startsWith('W');
+    const theme = EXPEDITION_THEMES[color];
+
+    let tileClasses =
+      'relative shrink-0 w-10 sm:w-12 h-full rounded-md flex flex-col items-center justify-center font-black select-none transition-all duration-100 touch-manipulation ';
+
+    if (isMine) {
+      tileClasses += `${theme.cardActiveBg} ${theme.cardActiveText} border-2 ${theme.cardActiveBorder} shadow-md scale-[0.96]`;
+    } else if (isLockedByOpponent) {
+      tileClasses +=
+        'bg-slate-900/75 text-slate-600 border border-slate-800/80 opacity-45 cursor-not-allowed';
+    } else {
+      tileClasses += `bg-slate-800/95 text-slate-200 border border-slate-700/90 border-t-2 ${theme.cardHintBorder} active:scale-95 active:bg-slate-700`;
+    }
+
+    return (
+      <button
+        type="button"
+        onClick={() => handleToggleCard(color, card, player)}
+        disabled={isLockedByOpponent}
+        aria-label={`${theme.label} ${isWager ? 'Wager' : card}${
+          isLockedByOpponent ? ' (Claimed by opponent)' : ''
+        }`}
+        className={tileClasses}
+      >
+        <span className={isWager ? 'text-sm sm:text-base leading-none' : 'text-sm sm:text-base leading-none'}>
+          {isWager ? '🤝' : card}
+        </span>
+
+        {isLockedByOpponent && (
+          <Lock className="w-2.5 h-2.5 text-slate-500 absolute bottom-0.5 right-0.5" />
+        )}
+      </button>
+    );
+  };
+
+  const ExpeditionRow = ({ color, player }) => {
+    const theme = EXPEDITION_THEMES[color];
+    const info = liveScores[player].expeditions[color];
+
+    return (
+      <div className="flex flex-row items-stretch w-full flex-1 min-h-0 bg-slate-900/90 rounded-lg overflow-hidden border border-slate-800 shadow-sm">
+        {/* Sticky Left Expedition Score Badge */}
+        <div
+          className={`${theme.badgeBg} ${theme.badgeText} w-14 sm:w-16 shrink-0 flex flex-col items-center justify-center px-1 border-r border-black/15 relative`}
+        >
+          {/* Multiplier pill when wagers are played */}
+          {info.wagerCount > 0 && (
+            <span className="text-[9px] font-extrabold uppercase tracking-tighter leading-none opacity-85 mb-0.5">
+              ×{info.wagerCount + 1}
+            </span>
+          )}
+
+          {/* Live Expedition Points */}
+          <span className="text-base sm:text-lg font-black leading-none tabular-nums">
+            {info.score}
+          </span>
+
+          {/* Card count / 8+ bonus indicator */}
+          {info.started ? (
+            <span
+              className={`text-[9px] font-extrabold leading-none mt-0.5 px-1 py-0.5 rounded ${
+                info.hasBonus ? 'bg-black/25' : 'opacity-75'
+              }`}
+            >
+              {info.hasBonus ? `${info.cardCount}★` : `${info.cardCount}c`}
+            </span>
+          ) : (
+            <span className="text-[8px] font-bold uppercase tracking-wider opacity-60 mt-0.5">
+              {theme.label.slice(0, 3)}
+            </span>
+          )}
+        </div>
+
+        {/* Horizontally Scrollable Cards Strip */}
+        <div className="flex-1 flex flex-row items-center overflow-x-auto gap-1.5 px-1.5 py-1 [&::-webkit-scrollbar]:hidden [-ms-overflow-style:none] [scrollbar-width:none] touch-pan-x">
+          {WAGERS.map((wagerCard) => (
+            <CardTile key={wagerCard} color={color} card={wagerCard} player={player} />
+          ))}
+
+          {/* Visual separator between Wagers and Numbered Cards */}
+          <div className="w-[2px] h-3/5 bg-slate-700/80 rounded-full shrink-0 mx-0.5" />
+
+          {NUMBERS.map((numCard) => (
+            <CardTile key={numCard} color={color} card={numCard} player={player} />
+          ))}
+        </div>
+      </div>
+    );
+  };
+
+  const PlayerHalf = ({ player }) => (
+    <div className="flex flex-col h-full w-full p-1.5 sm:p-2 gap-1.5 bg-slate-950 select-none">
+      {COLORS.map((color) => (
+        <ExpeditionRow key={color} color={color} player={player} />
+      ))}
+    </div>
+  );
+
+  // Winner determination for Scorecard Modal (after 3+ completed rounds)
+  const isMatchComplete = rounds.length >= STANDARD_ROUNDS;
+  const pointSpread = Math.abs(completedTotals.p1 - completedTotals.p2);
+  let winnerLabel = '';
+  if (isMatchComplete) {
+    if (completedTotals.p1 > completedTotals.p2) {
+      winnerLabel = `Player 1 Wins by ${pointSpread} pts!`;
+    } else if (completedTotals.p2 > completedTotals.p1) {
+      winnerLabel = `Player 2 Wins by ${pointSpread} pts!`;
+    } else {
+      winnerLabel = "Match Tied!";
+    }
+  }
+
+  return (
+    <div className="fixed inset-0 h-[100dvh] w-full flex flex-col bg-slate-950 text-slate-100 font-sans overflow-hidden touch-manipulation">
+      {/* === TOP HALF: PLAYER 2 (Rotated 180° for tabletop face-to-face play) === */}
+      <div className="flex-1 min-h-0 rotate-180 flex flex-col">
+        <PlayerHalf player="p2" />
+      </div>
+
+      {/* === CENTER CONSOLE: ROUND PILL, MIRRORED SCORES & ROUND CONTROLS === */}
+      <div className="h-16 sm:h-18 shrink-0 bg-slate-900 border-y-2 border-slate-700/90 shadow-[0_0_24px_rgba(0,0,0,0.85)] z-20 px-2 sm:px-4 flex items-center justify-between gap-1.5">
+        {/* Player 2 Live & Match Totals (Rotated 180° so P2 reads upright) */}
+        <button
+          type="button"
+          onClick={() => setIsScorecardOpen(true)}
+          className="rotate-180 flex flex-col items-start justify-center min-w-[74px] sm:min-w-[92px] px-2 py-1 rounded-lg bg-slate-800/80 border border-slate-700/80 active:scale-95 transition-transform"
+          title="Open Scorecard"
+        >
+          <div className="flex items-baseline gap-1">
+            <span className="text-[10px] font-extrabold text-sky-400 uppercase">P2</span>
+            <span className="text-lg sm:text-xl font-black leading-none tabular-nums text-white">
+              {runningMatchTotals.p2}
+            </span>
+          </div>
+          <span className="text-[10px] font-bold text-slate-400 leading-tight tabular-nums">
+            Rnd {formatSigned(liveScores.p2.total)}
+          </span>
+        </button>
+
+        {/* Center Multi-Round Control Cluster */}
+        <div className="flex items-center justify-center gap-1.5 sm:gap-2">
+          {/* Round Pill */}
+          <div className="px-2 py-1 rounded-md bg-slate-950 border border-slate-700 flex flex-col items-center justify-center shrink-0">
+            <span className="text-[8px] font-bold uppercase tracking-widest text-slate-400 leading-none">
+              Round
+            </span>
+            <span className="text-xs sm:text-sm font-black text-amber-400 leading-tight tabular-nums">
+              {currentRoundNumber <= STANDARD_ROUNDS
+                ? `${currentRoundNumber} / ${STANDARD_ROUNDS}`
+                : `${currentRoundNumber}`}
+            </span>
+          </div>
+
+          {/* Two-Tap End Round Button */}
+          <button
+            type="button"
+            onClick={handleEndRoundClick}
+            className={`px-2.5 sm:px-3.5 py-2 rounded-lg font-extrabold text-[11px] sm:text-xs tracking-wide transition-all shrink-0 flex items-center gap-1 shadow-sm ${
+              confirmEndRound
+                ? 'bg-amber-400 text-slate-950 ring-2 ring-amber-200 scale-105'
+                : 'bg-emerald-600 hover:bg-emerald-500 active:scale-95 text-white border border-emerald-400/40'
+            }`}
+          >
+            <Check className="w-3.5 h-3.5 stroke-[3]" />
+            <span>{confirmEndRound ? 'Confirm End?' : 'End Round'}</span>
+          </button>
+
+          {/* Scorecard Modal Trigger Button */}
+          <button
+            type="button"
+            onClick={() => setIsScorecardOpen(true)}
+            aria-label="Open Match Scorecard"
+            className="relative p-2 sm:px-3 sm:py-2 rounded-lg bg-slate-800 hover:bg-slate-700 active:scale-95 text-amber-300 border border-slate-600/80 transition-all shrink-0 flex items-center gap-1.5"
+          >
+            <Trophy className="w-4 h-4" />
+            <span className="hidden sm:inline text-xs font-bold text-slate-200">Scores</span>
+            {rounds.length > 0 && (
+              <span className="absolute -top-1.5 -right-1.5 min-w-[16px] h-4 px-1 rounded-full bg-amber-400 text-slate-950 text-[10px] font-black flex items-center justify-center">
+                {rounds.length}
+              </span>
+            )}
+          </button>
+        </div>
+
+        {/* Player 1 Live & Match Totals (Normal upright orientation) */}
+        <button
+          type="button"
+          onClick={() => setIsScorecardOpen(true)}
+          className="flex flex-col items-end justify-center min-w-[74px] sm:min-w-[92px] px-2 py-1 rounded-lg bg-slate-800/80 border border-slate-700/80 active:scale-95 transition-transform"
+          title="Open Scorecard"
+        >
+          <div className="flex items-baseline gap-1">
+            <span className="text-lg sm:text-xl font-black leading-none tabular-nums text-white">
+              {runningMatchTotals.p1}
+            </span>
+            <span className="text-[10px] font-extrabold text-amber-400 uppercase">P1</span>
+          </div>
+          <span className="text-[10px] font-bold text-slate-400 leading-tight tabular-nums">
+            Rnd {formatSigned(liveScores.p1.total)}
+          </span>
+        </button>
+      </div>
+
+      {/* === BOTTOM HALF: PLAYER 1 (Standard upright orientation) === */}
+      <div className="flex-1 min-h-0 flex flex-col">
+        <PlayerHalf player="p1" />
+      </div>
+
+      {/* === SCORECARD & MATCH HISTORY MODAL === */}
+      {isScorecardOpen && (
+        <div
+          className="fixed inset-0 z-50 bg-slate-950/85 backdrop-blur-sm flex items-center justify-center p-3 sm:p-4"
+          onClick={() => setIsScorecardOpen(false)}
+        >
+          <div
+            className="w-full max-w-md bg-slate-900 border border-slate-700 rounded-2xl shadow-2xl overflow-hidden flex flex-col max-h-[88dvh]"
+            onClick={(e) => e.stopPropagation()}
+          >
+            {/* Modal Header */}
+            <div className="px-4 py-3 bg-slate-800/90 border-b border-slate-700 flex items-center justify-between">
+              <div className="flex items-center gap-2">
+                <Trophy className="w-5 h-5 text-amber-400" />
+                <div>
+                  <h2 className="text-base font-black text-white leading-tight">
+                    Match Scorecard
+                  </h2>
+                  <p className="text-[11px] font-medium text-slate-400">
+                    {rounds.length} of {STANDARD_ROUNDS} standard rounds logged
+                  </p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setIsScorecardOpen(false)}
+                aria-label="Close Scorecard"
+                className="p-2 rounded-lg bg-slate-700/70 hover:bg-slate-700 text-slate-300 active:scale-95"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            {/* Winner Highlight Banner (Displayed once 3+ rounds are completed) */}
+            {isMatchComplete && (
+              <div className="mx-4 mt-3 px-4 py-3 rounded-xl bg-gradient-to-r from-amber-500/20 via-amber-400/25 to-emerald-500/20 border border-amber-400/50 flex items-center justify-between gap-2">
+                <div className="flex items-center gap-2.5">
+                  <div className="w-9 h-9 rounded-full bg-amber-400 text-slate-950 flex items-center justify-center shrink-0 shadow">
+                    <Sparkles className="w-5 h-5" />
+                  </div>
+                  <div>
+                    <div className="text-[10px] font-extrabold uppercase tracking-wider text-amber-300">
+                      {rounds.length === STANDARD_ROUNDS
+                        ? '3-Round Match Complete'
+                        : `${rounds.length}-Round Match Standing`}
+                    </div>
+                    <div className="text-sm sm:text-base font-black text-white">
+                      {winnerLabel}
+                    </div>
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {/* Round-by-Round Breakdown Table */}
+            <div className="p-4 overflow-y-auto flex-1">
+              <div className="rounded-xl border border-slate-700/90 overflow-hidden bg-slate-950/60">
+                <table className="w-full text-left border-collapse">
+                  <thead>
+                    <tr className="bg-slate-800/80 text-[11px] font-extrabold uppercase tracking-wider text-slate-400 border-b border-slate-700">
+                      <th className="py-2.5 px-3">Round</th>
+                      <th className="py-2.5 px-3 text-right text-amber-400">Player 1</th>
+                      <th className="py-2.5 px-3 text-right text-sky-400">Player 2</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-slate-800/80 text-sm">
+                    {/* Render completed rounds + placeholders up to Round 3 */}
+                    {Array.from({
+                      length: Math.max(STANDARD_ROUNDS, rounds.length),
+                    }).map((_, idx) => {
+                      const roundNum = idx + 1;
+                      const savedRound = rounds[idx];
+
+                      return (
+                        <tr
+                          key={roundNum}
+                          className={
+                            savedRound ? 'bg-slate-900/40' : 'bg-slate-950/30 text-slate-600'
+                          }
+                        >
+                          <td className="py-2.5 px-3 font-bold">
+                            Round {roundNum}
+                            {roundNum > STANDARD_ROUNDS && (
+                              <span className="ml-1.5 text-[10px] font-semibold px-1.5 py-0.5 rounded bg-slate-800 text-slate-400">
+                                Extra
+                              </span>
+                            )}
+                          </td>
+                          <td className="py-2.5 px-3 text-right font-extrabold tabular-nums">
+                            {savedRound ? (
+                              <span
+                                className={
+                                  savedRound.p1 >= 0 ? 'text-slate-100' : 'text-rose-400'
+                                }
+                              >
+                                {savedRound.p1}
+                              </span>
+                            ) : (
+                              '—'
+                            )}
+                          </td>
+                          <td className="py-2.5 px-3 text-right font-extrabold tabular-nums">
+                            {savedRound ? (
+                              <span
+                                className={
+                                  savedRound.p2 >= 0 ? 'text-slate-100' : 'text-rose-400'
+                                }
+                              >
+                                {savedRound.p2}
+                              </span>
+                            ) : (
+                              '—'
+                            )}
+                          </td>
+                        </tr>
+                      );
+                    })}
+
+                    {/* Live In-Progress Round Preview Row (when cards are currently on the board) */}
+                    {(liveScores.p1.totalCardsPlayed > 0 ||
+                      liveScores.p2.totalCardsPlayed > 0) && (
+                      <tr className="bg-amber-500/10 text-amber-200/90 italic text-xs">
+                        <td className="py-2 px-3 font-semibold">
+                          Round {currentRoundNumber} (Live)
+                        </td>
+                        <td className="py-2 px-3 text-right font-bold tabular-nums">
+                          {formatSigned(liveScores.p1.total)}
+                        </td>
+                        <td className="py-2 px-3 text-right font-bold tabular-nums">
+                          {formatSigned(liveScores.p2.total)}
+                        </td>
+                      </tr>
+                    )}
+                  </tbody>
+                  <tfoot>
+                    <tr className="bg-slate-800 border-t-2 border-slate-600 font-black text-base">
+                      <td className="py-3 px-3 text-slate-200">Grand Total</td>
+                      <td className="py-3 px-3 text-right tabular-nums text-amber-400">
+                        {completedTotals.p1}
+                      </td>
+                      <td className="py-3 px-3 text-right tabular-nums text-sky-400">
+                        {completedTotals.p2}
+                      </td>
+                    </tr>
+                  </tfoot>
+                </table>
+              </div>
+
+              {isMatchComplete && (
+                <p className="text-[11px] text-slate-400 text-center mt-2.5">
+                  Close this window anytime to continue playing extra rounds.
+                </p>
+              )}
+            </div>
+
+            {/* Modal Footer Controls: Undo Last Round & Two-Tap New Match */}
+            <div className="px-4 py-3 bg-slate-800/90 border-t border-slate-700 flex items-center justify-between gap-2">
+              <button
+                type="button"
+                onClick={handleUndoLastRound}
+                disabled={rounds.length === 0}
+                className={`px-3 py-2.5 rounded-xl font-bold text-xs flex items-center gap-1.5 transition-all ${
+                  rounds.length === 0
+                    ? 'bg-slate-800 text-slate-600 border border-slate-700/60 cursor-not-allowed'
+                    : 'bg-slate-700 hover:bg-slate-600 active:scale-95 text-slate-100 border border-slate-600'
+                }`}
+              >
+                <Undo2 className="w-3.5 h-3.5" />
+                <span>Undo Last Round</span>
+              </button>
+
+              <button
+                type="button"
+                onClick={handleNewMatchClick}
+                className={`px-3.5 py-2.5 rounded-xl font-extrabold text-xs flex items-center gap-1.5 transition-all ${
+                  confirmNewMatch
+                    ? 'bg-rose-600 text-white ring-2 ring-rose-300 scale-105'
+                    : 'bg-slate-900 hover:bg-rose-950/70 active:scale-95 text-rose-400 border border-rose-500/40'
+                }`}
+              >
+                <RotateCcw className="w-3.5 h-3.5" />
+                <span>{confirmNewMatch ? 'Confirm New Match?' : 'New Match'}</span>
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
